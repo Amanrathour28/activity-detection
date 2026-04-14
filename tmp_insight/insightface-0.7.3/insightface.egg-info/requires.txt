@@ -1,0 +1,10 @@
+numpy
+onnx
+tqdm
+requests
+matplotlib
+Pillow
+scipy
+scikit-learn
+scikit-image
+easydict
