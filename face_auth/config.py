@@ -19,8 +19,8 @@ EMBEDDING_FILE = os.path.join(
 )
 
 # ── Matching / Auth ──────────────────────────────────────────────────────────
-SIMILARITY_THRESHOLD   = 0.45    # Cosine similarity cutoff for positive match
-AUTH_CONSECUTIVE_FRAMES = 10     # Consecutive matching frames needed to auth
+SIMILARITY_THRESHOLD   = 0.40    # Cosine similarity cutoff for positive match
+AUTH_CONSECUTIVE_FRAMES = 5      # Consecutive matching frames needed to auth
 IDENTITY_GRACE_SECONDS  = 2.0   # Seconds to keep detection alive after face lost
 FACE_SKIP_FRAMES        = 3      # Re-embed every N frames (reduces CPU load)
 

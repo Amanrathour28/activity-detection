@@ -530,11 +530,13 @@ def run_live_camera(cam_index: int = 0):
                 time.sleep(0.01)
                 continue
 
+            # ── Submit to face auth worker (always) ───────────────────────────
+            # Give the un-flipped frame to the auth worker so the embedding
+            # perfectly matches the orientation saved during registration!
+            face_worker.submit_frame(frame.copy())
+
             frame = cv2.flip(frame, 1)
             frame_count += 1
-
-            # ── Submit to face auth worker (always) ───────────────────────────
-            face_worker.submit_frame(frame.copy())
 
             # ── Motion score ──────────────────────────────────────────────────
             gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -554,11 +556,15 @@ def run_live_camera(cam_index: int = 0):
                     current_phase    = AppPhase.SUCCESS
                     phase_start_time = now
             elif current_phase == AppPhase.SUCCESS:
-                if now - phase_start_time > 1.5:  # hold success for 1.5s
+                if not is_auth:
+                    current_phase = AppPhase.WAITING
+                elif now - phase_start_time > 1.5:  # hold success for 1.5s
                     current_phase    = AppPhase.COUNTDOWN
                     phase_start_time = now          # reset timer for countdown
             elif current_phase == AppPhase.COUNTDOWN:
-                if now - phase_start_time > 3.0:  # 3s countdown
+                if not is_auth:
+                    current_phase = AppPhase.WAITING
+                elif now - phase_start_time > 3.0:  # 3s countdown
                     current_phase = AppPhase.ACTIVE
             elif current_phase == AppPhase.ACTIVE:
                 if not is_auth:
