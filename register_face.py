@@ -12,6 +12,7 @@ Flow:
 
 Usage:
     python register_face.py
+    python register_face.py --cam 1     # use a different camera
 
 Controls:
     SPACE  — capture current frame
@@ -19,6 +20,8 @@ Controls:
 """
 
 import sys
+import time
+import argparse
 import cv2
 import numpy as np
 
@@ -72,7 +75,7 @@ def _draw_hud(display, count, total):
 
 # ── Main registration loop ─────────────────────────────────────────────────────
 
-def register():
+def register(cam_index: int = 0):
     print("\n" + "=" * 60)
     print("  FACE REGISTRATION")
     print(f"  Capture {config.REGISTRATION_IMAGES} images of your face.")
@@ -81,64 +84,75 @@ def register():
     print("  • Good lighting, neutral background preferred.")
     print("  • Press SPACE to capture, Q to abort.\n")
 
+    print("[FaceEngine] Loading model — this may take ~10 seconds on first run…")
     engine = FaceEngine()
 
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(cam_index)
     if not cap.isOpened():
-        print("[ERROR] Cannot open webcam. Check your camera connection.")
+        print(f"[ERROR] Cannot open webcam (index {cam_index}).")
+        print("  Try:  python register_face.py --cam 1")
         sys.exit(1)
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    # FIX: wrap in try/finally to guarantee camera release
+    try:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-    cv2.namedWindow("Face Registration", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Face Registration", 960, 540)
+        cv2.namedWindow("Face Registration", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Face Registration", 960, 540)
 
-    embeddings = []
-    total      = config.REGISTRATION_IMAGES
-    flash_msg  = ""
-    flash_until = 0.0
+        embeddings  = []
+        total       = config.REGISTRATION_IMAGES
+        flash_msg   = ""
+        flash_until = 0.0
 
-    while len(embeddings) < total:
-        ret, frame = cap.read()
-        if not ret:
-            continue
+        # FIX: skip first few frames — some cameras output dark/green frames initially
+        warmup_frames = 10
+        print(f"[Info] Warming up camera ({warmup_frames} frames)…")
+        for _ in range(warmup_frames):
+            cap.read()
 
-        # Mirror for natural selfie feel
-        display = cv2.flip(frame, 1)
-        _draw_hud(display, len(embeddings), total)
-
-        # Timed flash message (success / error feedback)
-        import time
-        if time.time() < flash_until:
-            color = (0, 255, 100) if flash_msg.startswith("✓") else (0, 80, 255)
-            cv2.putText(display, flash_msg, (10, 130),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
-
-        cv2.imshow("Face Registration", display)
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == ord('q'):
-            print("\n[INFO] Registration aborted.")
-            break
-
-        if key == ord(' '):
-            # Use the un-flipped frame for InsightFace (natural orientation)
-            faces = engine.detect_and_embed(frame)
-            if not faces:
-                flash_msg   = "✗ No face detected — please try again"
-                flash_until = time.time() + 2.0
-                print("  ✗ No face detected — try again.")
+        while len(embeddings) < total:
+            ret, frame = cap.read()
+            if not ret:
+                time.sleep(0.01)
                 continue
 
-            _, emb = _largest_face(faces)
-            embeddings.append(emb)
-            flash_msg   = f"✓ Captured {len(embeddings)}/{total}"
-            flash_until = time.time() + 1.5
-            print(f"  ✓ Captured {len(embeddings)}/{total}")
+            # Mirror for natural selfie feel
+            display = cv2.flip(frame, 1)
+            _draw_hud(display, len(embeddings), total)
 
-    cap.release()
-    cv2.destroyAllWindows()
+            # Timed flash message (success / error feedback)
+            if time.time() < flash_until:
+                color = (0, 255, 100) if flash_msg.startswith("✓") else (0, 80, 255)
+                cv2.putText(display, flash_msg, (10, 130),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
+
+            cv2.imshow("Face Registration", display)
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord('q'):
+                print("\n[INFO] Registration aborted.")
+                break
+
+            if key == ord(' '):
+                # Use the un-flipped frame for InsightFace (natural orientation)
+                faces = engine.detect_and_embed(frame)
+                if not faces:
+                    flash_msg   = "✗ No face detected — please try again"
+                    flash_until = time.time() + 2.0
+                    print("  ✗ No face detected — try again.")
+                    continue
+
+                _, emb = _largest_face(faces)
+                embeddings.append(emb)
+                flash_msg   = f"✓ Captured {len(embeddings)}/{total}"
+                flash_until = time.time() + 1.5
+                print(f"  ✓ Captured {len(embeddings)}/{total}")
+
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
 
     if not embeddings:
         print("\n[ERROR] No embeddings captured. Registration failed.")
@@ -146,7 +160,11 @@ def register():
 
     # Average all captures and re-normalise to unit length
     avg_emb = np.mean(embeddings, axis=0)
-    avg_emb = avg_emb / np.linalg.norm(avg_emb)
+    norm    = np.linalg.norm(avg_emb)
+    if norm == 0:
+        print("\n[ERROR] Embedding norm is zero — something went wrong.")
+        sys.exit(1)
+    avg_emb = avg_emb / norm
 
     np.save(config.EMBEDDING_FILE, avg_emb)
     print(f"\n[SUCCESS] Registered face saved → {config.EMBEDDING_FILE}")
@@ -156,4 +174,8 @@ def register():
 
 
 if __name__ == "__main__":
-    register()
+    parser = argparse.ArgumentParser(description="Face Registration Script")
+    parser.add_argument("--cam", default=0, type=int,
+                        help="Camera index (default 0)")
+    args = parser.parse_args()
+    register(cam_index=args.cam)

@@ -15,7 +15,7 @@ PRE-REQUISITE:
 USAGE:
   python run_inference.py               -->  Live camera (default)
   python run_inference.py --cam 1       -->  Use camera index 1
-  python run_inference.py --dataset     -->  Dataset slideshow mode
+  python run_inference.py --dataset     -->  Dataset slideshow mode (RGB_hand_labeled/)
   python run_inference.py --video video105   -->  One dataset video
 
 LIVE CONTROLS:
@@ -39,7 +39,8 @@ from detectors.posture_detector import PostureResult
 from display.hud import draw_skeleton, draw_mouth_box, draw_hud, draw_auth_overlay
 
 # ── Dataset helpers ────────────────────────────────────────────────────────────
-DATASET_DIR = Path(__file__).parent / "dataset"
+# FIX: DATASET_DIR corrected to existing RGB_hand_labeled folder
+DATASET_DIR = Path(__file__).parent / "RGB_hand_labeled"
 OUTPUT_DIR  = Path(__file__).parent / "output_results"
 
 ACTION_LABELS = {
@@ -92,8 +93,58 @@ def _draw_dataset_boxes(frame, anns):
     return out
 
 def run_dataset(video_name=None, max_frames=20):
+    """
+    Dataset viewer — supports both the nested video_id/BBOX/ layout
+    and the flat RGB_hand_labeled/bbox/ + RGB_hand_labeled/frames/ layout.
+    """
+    # Support flat structure (bbox/ and frames/ sub-folders at dataset root)
+    bbox_root  = DATASET_DIR / "bbox"
+    frames_root = DATASET_DIR / "frames"
+    has_flat = bbox_root.is_dir() and frames_root.is_dir()
+
+    if has_flat:
+        # Flat structure: bbox/*.txt, frames/*.jpg
+        bbox_files = sorted(bbox_root.glob("*.txt"), key=lambda p: _get_fnum(p.name))
+        rgb_map    = {_get_fnum(p): p for p in frames_root.glob("*.jpg")}
+        print(f"\n[Dataset mode] flat layout — {len(bbox_files)} annotation(s). SPACE=next  Q=quit\n")
+        shown = 0
+        for bf in bbox_files:
+            if video_name and video_name not in bf.name:
+                continue
+            fnum = _get_fnum(bf.name)
+            if fnum not in rgb_map:
+                continue
+            frame = cv2.imread(str(rgb_map[fnum]))
+            if frame is None:
+                continue
+            anns = _parse_bbox(bf)
+            if not anns:
+                continue
+            display = cv2.resize(_draw_dataset_boxes(frame, anns), (640, 480))
+            labels  = [ACTION_LABELS.get(a[0], str(a[0])) for a in anns]
+            cv2.setWindowTitle("FIR Dataset Viewer",
+                               f"frame {fnum}  |  {', '.join(labels)}")
+            cv2.imshow("FIR Dataset Viewer", display)
+            key = cv2.waitKey(120) & 0xFF
+            if key == ord('q'):
+                cv2.destroyAllWindows()
+                return
+            shown += 1
+            if max_frames and shown >= max_frames:
+                break
+        cv2.destroyAllWindows()
+        return
+
+    # Nested structure: video_id/BBOX/ and video_id/RGB/
     dirs = [DATASET_DIR / video_name] if video_name else sorted(DATASET_DIR.iterdir())
     dirs = [d for d in dirs if d.is_dir()]
+    if not dirs:
+        print(f"\n[Dataset mode] No video folders found in: {DATASET_DIR}")
+        print("  Expected either:")
+        print("    RGB_hand_labeled/bbox/*.txt  +  RGB_hand_labeled/frames/*.jpg  (flat)")
+        print("    RGB_hand_labeled/video_id/BBOX/*.txt  +  video_id/RGB/*.jpg   (nested)")
+        return
+
     print(f"\n[Dataset mode] {len(dirs)} video(s). SPACE=next  Q=quit\n")
     for vdir in dirs:
         bbox_dir = vdir / "BBOX"
@@ -145,7 +196,6 @@ class FaceAuthWorker:
     """
 
     def __init__(self, registered_emb: np.ndarray):
-        from face_auth.face_engine import FaceEngine
         from face_auth import config as fa_cfg
 
         self._registered_emb = registered_emb
@@ -158,11 +208,13 @@ class FaceAuthWorker:
         self._auth_bbox        = None         # smoothed bbox [x1,y1,x2,y2]
         self._auth_sim         = 0.0
         self._smooth_bbox      = None         # EMA smoother state
+        self._model_ready      = False        # True once FaceEngine is loaded
 
         self._running   = True
         self._fa_engine = None                # created inside thread
 
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="FaceAuthWorker")
         self._thread.start()
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -174,14 +226,18 @@ class FaceAuthWorker:
 
     def get_results(self):
         """
-        Return (is_authenticated, auth_bbox, auth_sim).
+        Return (is_authenticated, auth_bbox, auth_sim, model_ready).
         Always safe to call from the main thread.
         """
         with self._lock:
-            return self._is_authenticated, self._auth_bbox, self._auth_sim
+            return (self._is_authenticated, self._auth_bbox,
+                    self._auth_sim, self._model_ready)
 
     def stop(self):
+        """Signal the worker to stop and wait for it to exit (up to 2 s)."""
         self._running = False
+        # FIX: join thread so resources are freed before caller continues
+        self._thread.join(timeout=2.0)
 
     # ── Internal ───────────────────────────────────────────────────────────────
 
@@ -189,7 +245,12 @@ class FaceAuthWorker:
         from face_auth.face_engine import FaceEngine
         fa_cfg = self._fa_cfg
 
+        # FIX: loading feedback so user knows what's happening during init
+        print("[FaceAuth] Loading InsightFace model — please wait…")
         engine = FaceEngine()
+        with self._lock:
+            self._model_ready = True
+        print("[FaceAuth] Model ready. Looking for your face…")
 
         consecutive_matches  = 0
         last_match_time      = None
@@ -211,8 +272,12 @@ class FaceAuthWorker:
             if frame_counter % fa_cfg.FACE_SKIP_FRAMES != 0:
                 continue
 
-            faces = engine.detect_and_embed(frame)
-            match = engine.best_match(faces, self._registered_emb)
+            try:
+                faces = engine.detect_and_embed(frame)
+                match = engine.best_match(faces, self._registered_emb)
+            except Exception as exc:
+                print(f"[FaceAuth] Error during detection: {exc}")
+                continue
 
             now = time.time()
 
@@ -232,7 +297,6 @@ class FaceAuthWorker:
             else:
                 consecutive_matches = 0
                 # Grace period: keep authenticated for IDENTITY_GRACE_SECONDS
-                # after the face disappears
                 if last_match_time is not None:
                     elapsed = now - last_match_time
                     if elapsed > fa_cfg.IDENTITY_GRACE_SECONDS:
@@ -240,7 +304,7 @@ class FaceAuthWorker:
                             self._is_authenticated = False
                             self._auth_bbox        = None
                             self._auth_sim         = 0.0
-                        last_match_time = None
+                        last_match_time   = None
                         self._smooth_bbox = None
                 else:
                     with self._lock:
@@ -279,8 +343,12 @@ class DetectionWorker:
         self._pose_result  = None            # latest raw pose result (for skeleton)
         self._motion_score = 0.0
 
+        # FIX: reset flag to avoid race condition between reset() and _run()
+        self._reset_requested = False
+
         self._running = True
-        self._thread  = threading.Thread(target=self._run, daemon=True)
+        self._thread  = threading.Thread(target=self._run, daemon=True,
+                                         name="DetectionWorker")
         self._thread.start()
 
     def submit_frame(self, rgb_frame, motion_score: float):
@@ -295,12 +363,19 @@ class DetectionWorker:
             return self._posture, self._intake, self._pose_result
 
     def reset(self):
+        """
+        FIX: Use a flag instead of calling detector methods directly under lock.
+        The worker thread reads this flag and performs the actual reset
+        safely between update() calls.
+        """
         with self._lock:
-            self._posture_det.reset()
-            self._intake_det.reset()
+            self._reset_requested = True
 
     def stop(self):
+        """Signal the worker to stop and wait for it to exit (up to 2 s)."""
         self._running = False
+        # FIX: join thread before caller releases resources (cap, windows)
+        self._thread.join(timeout=2.0)
 
     def _run(self):
         """Worker loop — runs in background thread."""
@@ -311,6 +386,12 @@ class DetectionWorker:
                     frame    = self._latest_frame
                     motion   = self._motion_score
                     self._latest_frame = None   # consume it
+                    # FIX: handle reset request safely inside the worker thread,
+                    #      between update() calls — no race condition possible here
+                    if self._reset_requested:
+                        self._posture_det.reset()
+                        self._intake_det.reset()
+                        self._reset_requested = False
 
                 if frame is None:
                     time.sleep(0.001)
@@ -318,11 +399,16 @@ class DetectionWorker:
 
                 # Run MediaPipe
                 frame.flags.writeable = False
-                pose_res = pose_model.process(frame)
-                face_res = face_model.process(frame)
+                try:
+                    pose_res = pose_model.process(frame)
+                    face_res = face_model.process(frame)
+                except Exception as exc:
+                    print(f"[DetectionWorker] MediaPipe error: {exc}")
+                    time.sleep(0.01)
+                    continue
                 frame.flags.writeable = True
 
-                # Run detectors
+                # Run detectors — no lock held here (detectors are worker-thread-only)
                 h, w = frame.shape[:2]
                 fake_shape = (h, w, 3)
                 posture = self._posture_det.update(pose_res, motion)
@@ -373,8 +459,10 @@ def run_live_camera(cam_index: int = 0):
         print("="*64 + "\n")
         sys.exit(1)
 
-    registered_emb = np.load(str(emb_path))
-    print(f"[FaceAuth] Loaded registered embedding from {emb_path.name}")
+    # FIX: explicit allow_pickle=False is best practice for .npy files
+    registered_emb = np.load(str(emb_path), allow_pickle=False)
+    print(f"[FaceAuth] Loaded registered embedding from {emb_path.name} "
+          f"(shape={registered_emb.shape})")
 
     mp_pose    = mp.solutions.pose
     mp_face    = mp.solutions.face_mesh
@@ -425,7 +513,7 @@ def run_live_camera(cam_index: int = 0):
         COUNTDOWN = 2
         ACTIVE = 3
 
-    current_phase = AppPhase.WAITING
+    current_phase    = AppPhase.WAITING
     phase_start_time = 0.0
 
     prev_gray        = None
@@ -458,17 +546,17 @@ def run_live_camera(cam_index: int = 0):
             prev_gray    = gblur
 
             # ── Check auth, manage phase transitions ──────────────────────────
-            is_auth, auth_bbox, auth_sim = face_worker.get_results()
+            is_auth, auth_bbox, auth_sim, model_ready = face_worker.get_results()
             now = time.time()
 
             if current_phase == AppPhase.WAITING:
                 if is_auth:
-                    current_phase = AppPhase.SUCCESS
+                    current_phase    = AppPhase.SUCCESS
                     phase_start_time = now
             elif current_phase == AppPhase.SUCCESS:
                 if now - phase_start_time > 1.5:  # hold success for 1.5s
-                    current_phase = AppPhase.COUNTDOWN
-                    phase_start_time = now
+                    current_phase    = AppPhase.COUNTDOWN
+                    phase_start_time = now          # reset timer for countdown
             elif current_phase == AppPhase.COUNTDOWN:
                 if now - phase_start_time > 3.0:  # 3s countdown
                     current_phase = AppPhase.ACTIVE
@@ -504,10 +592,22 @@ def run_live_camera(cam_index: int = 0):
             draw_hud(frame, posture, intake, fps, motion_score, screenshot_flash)
 
             # ── Draw auth overlay on top of everything ────────────────────────
-            remaining = 3 - int(now - phase_start_time)
+            remaining     = 3 - int(now - phase_start_time)
             countdown_val = max(1, remaining) if current_phase == AppPhase.COUNTDOWN else 0
-            
-            draw_auth_overlay(frame, current_phase, auth_bbox, auth_sim, frame_count, countdown_val)
+
+            # Show loading indicator in WAITING if model not yet ready
+            if current_phase == AppPhase.WAITING and not model_ready:
+                loading_text = "Loading face model, please wait…"
+                (lw, lh), _ = cv2.getTextSize(loading_text,
+                                              cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+                cx = frame.shape[1] // 2
+                cy = frame.shape[0] - 40
+                cv2.putText(frame, loading_text, (cx - lw // 2, cy),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (120, 200, 255),
+                            1, cv2.LINE_AA)
+
+            draw_auth_overlay(frame, current_phase, auth_bbox, auth_sim,
+                              frame_count, countdown_val)
 
             cv2.imshow("Unified Activity Detection", frame)
 
@@ -525,10 +625,12 @@ def run_live_camera(cam_index: int = 0):
                 print("  [Reset] Session counters cleared.")
 
     finally:
-        face_worker.stop()
-        activity_worker.stop()
+        print("\n[Shutdown] Stopping workers…")
+        face_worker.stop()      # FIX: now joins the thread (up to 2s)
+        activity_worker.stop()  # FIX: now joins the thread (up to 2s)
         cap.release()
         cv2.destroyAllWindows()
+        print("[Shutdown] Camera released, windows closed.")
         if shot_count:
             print(f"\n[Done] {shot_count} screenshot(s) -> {shots_dir}")
 
@@ -537,7 +639,7 @@ def run_live_camera(cam_index: int = 0):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Face-Gated Unified Activity Detection — Live Camera + FIR Dataset"
+        description="Face-Gated Unified Activity Detection — Live Camera + Dataset"
     )
     parser.add_argument("--dataset",    action="store_true",
                         help="Run in dataset slideshow mode (no face auth)")

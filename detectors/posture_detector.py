@@ -9,6 +9,7 @@ FIXES in this version:
   We track angular velocity and require the angle to spike quickly AND be held.
   Slow bends (picking something up) are now correctly ignored.
 - Reduced smoothing window so the display feels more responsive (parallel).
+- FIX: _history changed from list (O(n) pop) to deque(maxlen) for O(1) append.
 """
 
 import time
@@ -60,9 +61,9 @@ class PostureDetector:
     """
 
     def __init__(self, smoothing_frames: int = 8):
-        # Reduced to 8 for faster response
-        self._history:            list  = []
-        self._smoothing:          int   = smoothing_frames
+        # FIX: Use deque with maxlen instead of plain list + O(n) pop(0)
+        self._history:            Deque[str] = deque(maxlen=smoothing_frames)
+        self._smoothing:          int        = smoothing_frames
         self._horizontal_start:   Optional[float] = None
         self.horizontal_duration: float = 0.0
 
@@ -77,9 +78,8 @@ class PostureDetector:
 
     def update(self, pose_result, motion_score: float) -> PostureResult:
         raw = self._classify(pose_result, motion_score)
+        # FIX: deque handles maxlen automatically — no manual pop(0) needed
         self._history.append(raw)
-        if len(self._history) > self._smoothing:
-            self._history.pop(0)
 
         counts = {}
         for a in self._history:
@@ -174,7 +174,7 @@ class PostureDetector:
         """
         Returns True only if the angle is:
         1. Above 40 degrees (real tilt, not just leaning forward slightly)
-        2. Has risen RAPIDLY (average slope > 2.5 deg/frame over last 10 frames)
+        2. Has risen RAPIDLY (average slope > 2.5 deg/frame over last 8 frames)
            — this distinguishes falling from slowly bending over
         """
         if current_angle < 40:
