@@ -368,7 +368,7 @@ class ActivityPipeline:
         self._mp_pose_obj = mp.solutions.pose.Pose(
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
-            model_complexity=1,
+            model_complexity=0,  # 0 = Lite (much faster for high FPS)
         ).__enter__()
         self._mp_face_obj = mp.solutions.face_mesh.FaceMesh(
             max_num_faces=1,
