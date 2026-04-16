@@ -2,9 +2,5 @@
 opencv-python>=4.5
 numpy>=1.21
 
-# Face Recognition
-insightface>=0.7.3
-onnxruntime>=1.15.0
-
 # Posture & Activity Detection
 mediapipe>=0.10.0

@@ -1,196 +1,165 @@
 """
 app/run_inference.py
-======================
-Unified Inference Pipeline combining Face Authentication and Activity Detection.
+=====================
+Live webcam inference for Activity and Intake Detection.
+(Face authentication is completely removed from this pipeline)
 
-1. FaceAuthentication (InsightFace) ensures only the registered user is tracked.
-2. ActivityPipeline (MediaPipe) runs Posture and Intake detection.
+Usage:
+    python app/run_inference.py              # Live webcam feed
+    python app/run_inference.py --cam 1      # Alternate camera index
 """
 
-import cv2
-import sys
-import time
 import pickle
+import argparse
+import time
+import sys
+import cv2
 import numpy as np
 from pathlib import Path
 
-# Setup paths so we can import modules
+# Fix paths so it works no matter where you run it from
 project_root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(project_root))
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-from face_auth.face_engine import FaceEngine
-from face_auth import config as auth_config
-from core.activity_pipeline import ActivityPipeline
+from core.activity_pipeline import ActivityPipeline  # noqa: F401
 
-# Paths
-REG_FACE_PATH = project_root / "face_auth" / "registered_face.npy"
-PIPELINE_PATH = project_root / "models" / "activity_pipeline.pkl"
+PKL_PATH = project_root / "models" / "activity_pipeline.pkl"
 
 
-class GatedInference:
-    def __init__(self):
-        print("[App] Initializing systems...")
-
-        # 1. Load Face Engine
-        if not REG_FACE_PATH.exists():
-            print(f"\n[ERROR] Registered face not found: {REG_FACE_PATH}")
-            print("Please run `python app/register_face.py` first.\n")
-            sys.exit(1)
-        self.registered_emb = np.load(str(REG_FACE_PATH))
-        self.face_engine = FaceEngine()
-
-        # 2. Load Activity Pipeline
-        if not PIPELINE_PATH.exists():
-            print(f"\n[ERROR] Pipeline model not found: {PIPELINE_PATH}")
-            print("Please run `python core/build_pipeline.py` first.\n")
-            sys.exit(1)
-            
-        with open(str(PIPELINE_PATH), "rb") as f:
-            self.activity_pipeline = pickle.load(f)
-        print(f"[App] Loaded ActivityPipeline v{self.activity_pipeline.VERSION}")
-
-        # Auth State
-        self.auth_consecutive = 0
-        self.is_authenticated = False
-        self.last_bbox = None
-        self.target_fps = 30
-
-    def run(self, cam_index=0):
-        cap = cv2.VideoCapture(cam_index)
-        if not cap.isOpened():
-            print(f"[ERROR] Could not open camera {cam_index}")
-            return
-
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
-        print("\n── Live inference started ──────────────────────────────")
-        print("  Controls: Q=Quit  R=Reset counters")
+def load_pipeline():
+    """Load the pkl — this is all you need in any external app."""
+    if not PKL_PATH.exists():
+        print(f"[ERROR] Pipeline model not found: {PKL_PATH}")
+        print("Please run `python core/build_pipeline.py` first.\n")
+        sys.exit(1)
         
-        cv2.namedWindow("Secure Activity Monitor", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Secure Activity Monitor", 1280, 720)
+    with open(str(PKL_PATH), "rb") as f:
+        pipeline = pickle.load(f)
+    print(f"[OK] Loaded ActivityPipeline v{pipeline.VERSION}")
+    print(f"     Posture labels : {pipeline.get_labels()['posture_labels']}")
+    print(f"     Intake labels  : {pipeline.get_labels()['intake_labels']}")
+    return pipeline
 
-        # To limit FPS so we don't cook the CPU
-        frame_time = 1.0 / self.target_fps
-        
-        try:
-            while True:
-                start_t = time.time()
-                ret, frame = cap.read()
-                if not ret:
-                    time.sleep(0.01)
-                    continue
 
-                display = cv2.flip(frame, 1)
+def demo_live(pipeline, cam_index=0):
+    """
+    Live webcam inference.
+    Overlays posture + intake predictions on the camera feed.
+    Press Q to quit, R to reset session.
+    """
+    cap = cv2.VideoCapture(cam_index)
+    if not cap.isOpened():
+        print(f"[ERROR] Cannot open camera {cam_index}")
+        return
 
-                # ── 1. FACE AUTHENTICATION ─────────────────────────────────────────
-                # We only need to run full InsightFace if we are trying to authenticate 
-                # or if we lost the track bounding box over the last few frames.
-                # For simplicity and robustness, we run FaceEngine every frame 
-                # to find the target face.
-                
-                faces = self.face_engine.detect_and_embed(frame)
-                match_result = self.face_engine.best_match(faces, self.registered_emb)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-                if match_result:
-                    bbox, sim = match_result
-                    self.last_bbox = bbox
-                    self.auth_consecutive += 1
-                    if self.auth_consecutive >= auth_config.CONSECUTIVE_FRAMES_REQ:
-                        self.is_authenticated = True
-                else:
-                    self.auth_consecutive = 0
-                    self.is_authenticated = False
-                    self.last_bbox = None
+    print("\n── Live webcam monitor ──────────────────────────────────")
+    print("  Controls: Q=Quit  R=Reset session")
+    cv2.namedWindow("Activity Monitor", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Activity Monitor", 1280, 720)
 
-                fh, fw = display.shape[:2]
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                time.sleep(0.01)
+                continue
 
-                # ── 2. ACTIVITY DETECTION (only if auth passes) ────────────────────
-                if self.is_authenticated:
-                    # Run activity pipeline
-                    res = self.activity_pipeline.predict(frame)
-                    
-                    # --- Overlay Rendering ---
-                    p_color = res["posture_color"]
-                    
-                    # Top auth bar (Green)
-                    cv2.rectangle(display, (0,0), (fw, 30), (40, 200, 40), -1)
-                    cv2.putText(display, "AUTHENTICATED: Tracking User", (12, 22), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-                    
-                    # Posture Banner
-                    cv2.rectangle(display, (0, 30), (300, 100), (20,20,20), -1)
-                    cv2.putText(display, f"{res['posture_icon']} {res['posture_label']}", 
-                                (12, 70), cv2.FONT_HERSHEY_DUPLEX, 0.8, p_color, 2)
-                    cv2.putText(display, "POSTURE", (12, 45), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (160,160,160), 1)
-                                
-                    # Intake Badge
-                    if res["is_intake"]:
-                        i_color = res["intake_color"]
-                        cv2.rectangle(display, (fw-300, 30), (fw, 100), (20,20,20), -1)
-                        icon = "[EAT]" if res["intake"] == "EATING" else "[SIP]"
-                        cv2.putText(display, f"{icon} {res['intake']}", 
-                                    (fw-288, 70), cv2.FONT_HERSHEY_DUPLEX, 0.8, i_color, 2)
-                        cv2.putText(display, f"INTAKE  |  bites: {res['bite_count']}", 
-                                    (fw-288, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (160,160,160), 1)
+            display = cv2.flip(frame, 1)
 
-                    # Bottom stats bar
-                    cv2.rectangle(display, (0, fh-40), (fw, fh), (20,20,20), -1)
-                    cv2.putText(display, f"FPS: {res['fps']:.1f} | Angle: {res['body_angle']:.1f} | Activity: {res['posture_desc']}", 
-                                (12, fh-15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
+            # ── Core inference call ──────────────────────────────────────────
+            result = pipeline.predict(frame)   # un-flipped frame for inference
+            # ────────────────────────────────────────────────────────────────
 
-                    # Draw Face bounding box on flipped display
-                    if self.last_bbox is not None:
-                        # Bbox coordinates must be flipped horizontally
-                        x1, y1, x2, y2 = self.last_bbox
-                        fx1 = fw - x2
-                        fx2 = fw - x1
-                        cv2.rectangle(display, (fx1, y1), (fx2, y2), (40,200,40), 2)
+            fh, fw = display.shape[:2]
+            p_color = tuple(result["posture_color"])
+            i_color = tuple(result["intake_color"])
 
-                else:
-                    # Not authenticated rendering
-                    self.activity_pipeline.reset()  # Reset history so new users start fresh
-                    
-                    # Top auth bar (Red)
-                    prog = self.auth_consecutive / max(1, auth_config.CONSECUTIVE_FRAMES_REQ)
-                    cv2.rectangle(display, (0,0), (fw, 30), (0, 0, 200), -1)
-                    cv2.putText(display, "UNAUTHORIZED: Waiting for valid face...", (12, 22), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-                                
-                    # Progress bar if partially authenticated
-                    if prog > 0:
-                        cv2.rectangle(display, (0,30), (int(fw * prog), 40), (0, 150, 255), -1)
-                        
-                    # Blur background for privacy
-                    display = cv2.GaussianBlur(display, (51, 51), 0)
+            # ── Draw posture banner ──────────────────────────────────────────
+            overlay = display.copy()
+            cv2.rectangle(overlay, (0, 0), (fw, 78), (12, 12, 12), -1)
+            cv2.addWeighted(overlay, 0.82, display, 0.18, 0, display)
+            cv2.putText(display,
+                        f"{result['posture_icon']} {result['posture_label']}",
+                        (12, 58), cv2.FONT_HERSHEY_DUPLEX,
+                        1.0, p_color, 2, cv2.LINE_AA)
+            cv2.putText(display, "POSTURE", (12, 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.40,
+                        (160, 160, 160), 1, cv2.LINE_AA)
+            cv2.putText(display, f"{result['fps']:.0f} FPS",
+                        (fw - 90, 20), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.40, (90, 90, 90), 1, cv2.LINE_AA)
+            cv2.putText(display,
+                        f"angle: {result['body_angle']:.1f}°",
+                        (fw - 160, 58), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.40, (100, 100, 100), 1, cv2.LINE_AA)
 
-                cv2.imshow("Secure Activity Monitor", display)
-                
-                # Input Handling
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    break
-                elif key == ord('r'):
-                    self.activity_pipeline.reset()
-                    print("  [Action] Reset session counters.")
-                    
-                # FPS sleep
-                elapsed = time.time() - start_t
-                sleep_time = frame_time - elapsed
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
+            # ── Draw intake badge ────────────────────────────────────────────
+            if result["is_intake"]:
+                mid = fw // 2
+                cv2.line(display, (mid, 0), (mid, 78), (60, 60, 60), 1)
+                roi = display[0:78, mid:fw]
+                over = roi.copy()
+                cv2.rectangle(over, (0, 0), (fw - mid, 78), i_color, -1)
+                cv2.addWeighted(over, 0.14, roi, 0.86, 0, roi)
+                display[0:78, mid:fw] = roi
+                icon = "[EAT]" if result["intake"] == "EATING" else "[SIP]"
+                cv2.putText(display,
+                            f"{icon} {result['intake']}",
+                            (mid + 12, 58), cv2.FONT_HERSHEY_DUPLEX,
+                            1.0, i_color, 2, cv2.LINE_AA)
+                cv2.putText(display, "INTAKE", (mid + 12, 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.40,
+                            (200, 200, 200), 1, cv2.LINE_AA)
+                cv2.putText(display,
+                            f"bites:{result['bite_count']} bpm:{result['bpm']}",
+                            (fw - 240, 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                            i_color, 1, cv2.LINE_AA)
 
-        finally:
-            cap.release()
-            cv2.destroyAllWindows()
+            # ── Draw bottom stats bar ────────────────────────────────────────
+            bar_y = fh - 60
+            overlay2 = display.copy()
+            cv2.rectangle(overlay2, (0, bar_y), (fw, fh), (12, 12, 12), -1)
+            cv2.addWeighted(overlay2, 0.82, display, 0.18, 0, display)
+            cv2.line(display, (0, bar_y), (fw, bar_y), (50, 50, 50), 1)
+            cv2.putText(display, result["posture_desc"], (12, bar_y + 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.50,
+                        (200, 200, 200), 1, cv2.LINE_AA)
+            horiz = f"  | on floor: {result['horizontal_duration']:.0f}s" \
+                    if result["posture"] in ("sleeping", "lying") else ""
+            cv2.putText(display,
+                        f"body_angle: {result['body_angle']:.1f}°{horiz}",
+                        (12, bar_y + 46),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                        (100, 100, 100), 1, cv2.LINE_AA)
+            cv2.putText(display, "Q=Quit  R=Reset",
+                        (fw - 180, fh - 6), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.38, (70, 70, 70), 1, cv2.LINE_AA)
+
+            # ── Left colour strip ────────────────────────────────────────────
+            cv2.rectangle(display, (0, 78), (6, bar_y), p_color, -1)
+
+            cv2.imshow("Activity Monitor", display)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                break
+            elif key == ord("r"):
+                pipeline.reset()
+                print("  [Reset] Session cleared.")
+
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Activity Monitor")
     parser.add_argument("--cam", default=0, type=int, help="Camera index")
     args = parser.parse_args()
 
-    app = GatedInference()
-    app.run(cam_index=args.cam)
+    pipeline = load_pipeline()
+    demo_live(pipeline, cam_index=args.cam)
