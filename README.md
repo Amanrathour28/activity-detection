@@ -23,7 +23,7 @@ Built on InsightFace (authentication) + MediaPipe Pose (activity classification)
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/pandeyadarsh2503/activity-detection.git
+
 cd activity-detection
 ```
 
