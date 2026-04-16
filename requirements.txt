@@ -1,16 +1,10 @@
-# ── Core computer-vision libraries ─────────────────────────────────────
-opencv-python>=4.8.0
-numpy>=1.24.0
+# AI/Computer Vision
+opencv-python>=4.5
+numpy>=1.21
 
-# ── MediaPipe (pose + face mesh) ────────────────────────────────────────
-mediapipe>=0.10.0
-
-# ── InsightFace (face detection + embedding) ────────────────────────────
-# insightface requires onnxruntime for CPU inference
+# Face Recognition
 insightface>=0.7.3
-onnxruntime>=1.16.0        # CPU-only; swap for onnxruntime-gpu for CUDA
+onnxruntime>=1.15.0
 
-# ── Deep-learning (model_code/ only — not needed for live inference) ────
-# tensorflow>=2.13.0       # Uncomment if you want to train or run model_code/
-# keras>=2.13.0            # Included with TensorFlow; uncomment if using standalone Keras
-matplotlib>=3.7.0          # Used by model_code/model.py for training plots
+# Posture & Activity Detection
+mediapipe>=0.10.0

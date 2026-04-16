@@ -1,126 +1,61 @@
-# AI Activity Detection — Face-Gated Live Monitoring
+# Unified Face-Gated Activity Detection
 
-Real-time activity detection that **only monitors the registered user**.  
-Built on InsightFace (authentication) + MediaPipe Pose (activity classification).
-
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Python](https://img.shields.io/badge/python-3.10+-brightgreen.svg)
-
----
-
-## 🚀 Key Features
-
-- **Face-Gated Pipeline**: Activity detection only activates for the pre-registered user — all other people are ignored.
-- **Live Camera Mode**: Real-time pose analysis using MediaPipe.
-- **Posture Classification**: Detects Standing, Walking, Sitting, Falling, Lying, and Sleeping.
-- **Intake Detection**: Detects Eating and Drinking events with Bites Per Minute (BPM) tracking.
-- **Dataset Mode**: Visualizes and analyzes ground-truth labels from the FIR Thermal dataset.
-- **Threaded Architecture**: Face auth (InsightFace) and activity detection (MediaPipe) run in separate background threads for smooth 30+ FPS display.
-
----
-
-## 🛠️ Installation
-
-### 1. Clone the repository
-```bash
-
-cd activity-detection
-```
-
-### 2. Install dependencies
-```bash
-pip install opencv-python numpy mediapipe insightface onnxruntime
-```
-
-> **Note**: `insightface` will automatically download the `buffalo_s` model pack (~80 MB) on first run.
-
----
-
-## 💻 Usage
-
-### Step 1 — Register your face (run once)
-```bash
-python register_face.py
-```
-- Opens your webcam.  
-- Press **SPACE** 5 times to capture photos of your face.  
-- Saves your face embedding to `face_auth/registered_face.npy`.
-
-### Step 2 — Run live detection
-```bash
-python run_inference.py
-```
-- The system shows **"FACE AUTHENTICATION REQUIRED"** until it recognises you.
-- Once your face matches, activity detection (posture + intake) starts automatically.
-- If you leave the frame for more than 2 seconds, it reverts to the waiting state.
-
-**Controls:**
-| Key | Action |
-|-----|--------|
-| `Q` | Quit |
-| `S` | Save screenshot |
-| `R` | Reset session counters |
-
-### Dataset Mode (no face auth)
-```bash
-# All videos (first 20 frames each)
-python run_inference.py --dataset
-
-# Single video
-python run_inference.py --video video105 --max-frames 50
-
-# Change camera index
-python run_inference.py --cam 1
-```
-
----
+This project uses a minimal, production-ready architecture to perform real-time face authentication (InsightFace) followed by posture and intake detection (MediaPipe).
 
 ## 📂 Project Structure
 
+```text
+├── app/
+│   ├── register_face.py        # 1. Run this first to enroll authorized user
+│   └── run_inference.py        # 2. Main Live Viewer (FaceAuth + Activity)
+│
+├── core/
+│   ├── activity_pipeline.py    # Standalone engine for MediaPipe rules
+│   └── build_pipeline.py       # Developer script to regenerate the .pkl
+│   
+├── face_auth/                  # Face Engine (InsightFace wrapper)
+│   ├── config.py
+│   ├── face_engine.py
+│   └── registered_face.npy     # Saved enrollment data
+│
+├── models/
+│   └── activity_pipeline.pkl   # Serialized pipeline / state config
+│
+├── scripts/
+│   ├── example_usage.py        # Demo without Face Authentication
+│   └── verify_pipeline.py      # Automated tests
+│
+└── requirements.txt
 ```
-localisation_activity/
-├── run_inference.py          # Main entry point
-├── register_face.py          # One-time face registration script
-│
-├── face_auth/                # InsightFace authentication module
-│   ├── face_engine.py        # FaceEngine wrapper (detect + embed + match)
-│   ├── config.py             # Tunable auth parameters
-│   └── registered_face.npy  # Saved face embedding (git-ignored)
-│
-├── detectors/                # Activity detection logic
-│   ├── posture_detector.py   # MediaPipe Pose → posture classification
-│   └── intake_detector.py    # Wrist-to-mouth → eating / drinking
-│
-├── display/                  # HUD rendering
-│   └── hud.py                # draw_hud(), draw_auth_overlay(), etc.
-│
-├── model_code/               # FIR dataset model architecture
-└── dataset/                  # FIR thermal dataset (not included — see below)
+
+---
+
+## 🚀 Quickstart
+
+**1. Install minimal dependencies**
+```bash
+pip install -r requirements.txt
 ```
 
----
+**2. Register your face (Required)**
+```bash
+python app/register_face.py
+```
+* Look at the camera until it captures your face geometry. This creates `face_auth/registered_face.npy`.
 
-## ⚙️ Configuration
-
-Tune authentication behaviour in `face_auth/config.py`:
-
-| Parameter | Default | Description |
-|---|---|---|
-| `SIMILARITY_THRESHOLD` | `0.45` | Cosine similarity cutoff for a positive match |
-| `AUTH_CONSECUTIVE_FRAMES` | `10` | Consecutive matching frames needed to authenticate |
-| `IDENTITY_GRACE_SECONDS` | `2.0` | Seconds to stay authenticated after face disappears |
-| `FACE_SKIP_FRAMES` | `3` | Re-embed every N frames (reduce CPU) |
-
----
-
-## 📊 Dataset Attribution
-
-1. **[ThomasDubail/FIR-Image-Action-Localisation-Dataset](https://github.com/ThomasDubail/FIR-Image-Action-Localisation-Dataset)**: Annotated bounding boxes.
-2. **[noahzhy/FIR-Image-Action-Dataset](https://github.com/noahzhy/FIR-Image-Action-Dataset)**: Original FIR sensor data.
-
-> The full `dataset/` folder (~3.5 GB) is excluded. Download and place it in the project root to use Dataset Mode.
+**3. Run the secure live monitor**
+```bash
+python app/run_inference.py
+```
+* If the camera sees someone else, the screen blurs and denies access.
+* If it sees you, the Activity Engine activates, detecting:
+  * **Posture**: Standing, Sitting, Falling, Lying, Sleeping.
+  * **Intake**: Eating, Drinking, Bites Per Minute.
 
 ---
 
-## ⚖️ License
-For educational and research purposes. Refer to the origin datasets for their respective licenses.
+## 🔧 Features
+
+* **Complete Privacy Isolation**: Face Auth is isolated from Activity Detection. The user history and bite count drops to zero if an unauthorized person steps in frame.
+* **Dependency-Lite Pipeline**: Posture/Intake relies purely on `mediapipe` and runs extremely fast on CPU.
+* **Portable Core**: The `.pkl` format allows exporting the activity logic to other projects easily. Just grab `core/activity_pipeline.py` and `models/activity_pipeline.pkl`.
